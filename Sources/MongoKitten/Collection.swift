@@ -1,4 +1,4 @@
-//
+ //
 //  Collection.swift
 //  MongoSwift
 //
@@ -9,23 +9,19 @@
 import Foundation
 import BSON
 
+public typealias MongoCollection = Collection
+ 
 /// Represents a single MongoDB collection.
 ///
 /// **### Definition ###**
 ///
 /// A grouping of MongoDB documents. A collection is the equivalent of an RDBMS table. A collection exists within a single database. Collections do not enforce a schema. Documents within a collection can have different fields. Typically, all documents in a collection have a similar or related purpose. See Namespaces.
 public final class Collection {
-    /// A callback that will be executed when a Document is found matching the provided `Query`
-    public typealias Callback = (query: Query, failure: CallbackFailure , callback: (Document) throws -> ())
-    
     /// The Database this collection is in
     public private(set) var database: Database
     
     /// The collection name
     public private(set) var name: String
-    
-    /// Callback storage
-    public private(set) var callbacks = [Operation: [Callback]]()
     
     /// The full (computed) collection name. Created by adding the Database's name with the Collection's name with a dot to seperate them
     /// Will be empty
@@ -42,71 +38,6 @@ public final class Collection {
         self.name = name
     }
     
-    /// The action that will be done when a allback fails to execute
-    public enum CallbackFailure {
-        /// Do nothing
-        case nothing
-        
-        /// Rethrow the error
-        case `throw`
-        
-        /// Call a closure
-        case callback((Document, Query) -> ())
-    }
-    
-    /// What kind of operation the `Callback` will be applied to
-    public enum Operation {
-        /// Insert operations
-        case insert
-        
-        // Find operations
-        case find
-        
-        /// Update operations
-        case update
-        
-        /// Delete operations
-        case delete
-    }
-    
-    /// Registers a trigger for the given operation.
-    ///
-    /// - parameter op: The operation (insert, find, update or delete) to register for.
-    /// - parameter query: The query to filter operations on.
-    /// - parameter failure: Describes how errors thrown from the trigger callback will be handled.
-    /// - parameter callback: The method that will be called for this trigger.
-    public func on(_ op: Operation, matching query: Query, onFailure failure: CallbackFailure = .`throw`, callback: @escaping (Document) throws -> ()) {
-        if callbacks[op] == nil {
-            callbacks[op] = []
-        }
-        
-        callbacks[op]?.append((query: query, failure: failure, callback: callback))
-    }
-    
-    /// Takes the `Callback`s registered for an `Operation` and matches the provided `Document`s against the `Query`
-    ///
-    /// - throws: When the callback fails and the failure-state is set to throw
-    private func handleCallback(forDocuments documents: [Document], inOperation op: Operation) throws {
-        if callbacks.keys.contains(op) {
-            for callback in callbacks[op]! {
-                for d in documents where d.matches(query: callback.query) {
-                    do {
-                        try callback.callback(d)
-                    } catch {
-                        switch callback.failure {
-                        case .`throw`:
-                            throw error
-                        case .callback(let failure):
-                            failure(d, callback.query)
-                        case .nothing:
-                            continue
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
     // MARK: - CRUD Operations
     
     // Create
@@ -119,16 +50,16 @@ public final class Collection {
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     ///
-    /// - returns: The inserted document
+    /// - returns: The inserted document's id
     @discardableResult
-    public func insert(_ document: Document) throws -> Document {
+    public func insert(_ document: Document) throws -> ValueConvertible {
         let result = try self.insert([document])
         
-        guard let newDocument: Document = result.first else {
+        guard let newId = result.first else {
             throw MongoError.insertFailure(documents: [document], error: nil)
         }
         
-        return newDocument
+        return newId
     }
     
     /// TODO: Detect how many bytes are being sent. Max is 48000000 bytes or 48MB
@@ -143,42 +74,38 @@ public final class Collection {
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     ///
-    /// - returns: The documents with their (if applicable) updated ObjectIds
+    /// - returns: The documents' ids
     @discardableResult
-    public func insert(_ documents: [Document], stoppingOnError ordered: Bool? = nil, timeout customTimeout: TimeInterval? = nil) throws -> [Document] {
-        let timeout: TimeInterval
-        if let customTimeout = customTimeout {
-            timeout = customTimeout
-        } else {
-            timeout = 60 + (Double(documents.count) / 50)
-        }
+    public func insert(_ documents: [Document], stoppingOnError ordered: Bool? = nil, timeout customTimeout: TimeInterval? = nil) throws -> [ValueConvertible] {
+        let timeout: TimeInterval = customTimeout ?? (60 + (Double(documents.count) / 50))
         
         var documents = documents
-        var newDocuments = [Document]()
+        var newIds = [ValueConvertible]()
         let protocolVersion = database.server.serverData?.maxWireVersion ?? 0
         
         while !documents.isEmpty {
             if protocolVersion >= 2 {
-                var command: Document = ["insert": .string(self.name)]
+                var command: Document = ["insert": self.name]
                 
-                let commandDocuments = documents[0..<min(1000, documents.count)].map({ (input: Document) -> Value in
-                    if input["_id"] == .nothing {
-                        var output = input
-                        output["_id"] = ~ObjectId()
-                        newDocuments.append(output)
-                        return .document(output)
+                let commandDocuments = documents[0..<min(1000, documents.count)].map({ (input: Document) -> ValueConvertible in
+                    if let id = input["_id"] {
+                        newIds.append(id)
+                        return input
                     } else {
-                        newDocuments.append(input)
-                        return .document(input)
+                        var output = input
+                        let oid = ObjectId()
+                        output["_id"] = oid
+                        newIds.append(oid)
+                        return output
                     }
                 })
                 
                 documents.removeFirst(min(1000, documents.count))
                 
-                command["documents"] = .array(Document(array: commandDocuments))
+                command["documents"] = Document(array: commandDocuments)
                 
                 if let ordered = ordered {
-                    command["ordered"] = .boolean(ordered)
+                    command["ordered"] = ordered
                 }
                 
                 let reply = try self.database.execute(command: command, until: timeout)
@@ -186,27 +113,30 @@ public final class Collection {
                     throw MongoError.insertFailure(documents: documents, error: nil)
                 }
                 
-                guard replyDocuments.first?["ok"].int32 == 1 else {
+                guard replyDocuments.first?["ok"] == 1 else {
                     throw MongoError.insertFailure(documents: documents, error: replyDocuments.first)
                 }
-                try handleCallback(forDocuments: commandDocuments.flatMap{ $0.documentValue }, inOperation: .insert)
             } else {
+                let connection = try database.server.reserveConnection()
+                
+                defer {
+                    database.server.returnConnection(connection)
+                }
+                
                 let commandDocuments = Array(documents[0..<min(1000, documents.count)])
                 documents.removeFirst(min(1000, documents.count))
                 
                 let insertMsg = Message.Insert(requestID: database.server.nextMessageID(), flags: [], collection: self, documents: commandDocuments)
-                _ = try self.database.server.send(message: insertMsg)
-                
-                try handleCallback(forDocuments: commandDocuments, inOperation: .insert)
+                _ = try self.database.server.send(message: insertMsg, overConnection: connection)
             }
         }
         
-        return newDocuments
+        return newIds
     }
     
     // Read
     
-    /// Queries this `Collection` with a `Document`
+    /// Executes a query on this `Collection` with a `Document`
     ///
     /// This is used to execute DBCommands. For finding `Document`s we recommend the `find` command
     ///
@@ -219,71 +149,23 @@ public final class Collection {
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     ///
     /// - returns: A Cursor pointing to the response Documents.
-    public func query(matching filter: Document = [], usingFlags flags: QueryFlags = [], fetching fetchChunkSize: Int32 = 10) throws -> Cursor<Document> {
-        let queryMsg = Message.Query(requestID: database.server.nextMessageID(), flags: flags, collection: self, numbersToSkip: 0, numbersToReturn: fetchChunkSize, query: filter, returnFields: nil)
+    public func execute(command: Document = [], usingFlags flags: QueryFlags = [], fetching fetchChunkSize: Int32 = 10) throws -> Cursor<Document> {
+        let connection = try database.server.reserveConnection()
         
-        let id = try self.database.server.send(message: queryMsg)
-        let response = try self.database.server.await(response: id)
-        guard let cursor = Cursor(namespace: self.fullName, server: database.server, reply: response, chunkSize: fetchChunkSize, transform: { $0 }) else {
+        defer {
+            database.server.returnConnection(connection)
+        }
+        
+        let queryMsg = Message.Query(requestID: database.server.nextMessageID(), flags: flags, collection: self, numbersToSkip: 0, numbersToReturn: fetchChunkSize, query: command, returnFields: nil)
+        
+        let response = try self.database.server.sendAndAwait(message: queryMsg, overConnection: connection)
+        guard let cursor = Cursor(namespace: self.fullName, collection: self, reply: response, chunkSize: fetchChunkSize, transform: { $0 }) else {
             throw MongoError.invalidReply
         }
         
         return cursor
     }
-    
-    
-    /// Queries this collection with a `Document` (which comes from the `QueryProtocol`)
-    ///
-    /// This is used to execute DBCommands. For finding `Document`s we recommend the `find` command
-    ///
-    /// For more information: https://docs.mongodb.com/manual/reference/mongodb-wire-protocol/
-    ///
-    /// - parameter filter: The `Query` that we're matching against in this `Collection`. This `Query` is from the MongoKitten QueryBuilder or is a `Document`.
-    /// - parameter flags: The Query Flags that we'll use for this query
-    /// - parameter fetchChunkSize: The initial amount of returned Documents. We recommend at least one Document.
-    ///
-    /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    ///
-    /// - returns: A Cursor pointing to the response Documents.
-    public func query(matching filter: QueryProtocol, usingFlags flags: QueryFlags = [], fetching fetchChunkSize: Int32 = 10) throws -> Cursor<Document> {
-        return try self.query(matching: filter.data, usingFlags: flags, fetching: fetchChunkSize)
-    }
-    
-    /// Queries this `Collection` with a `Document` and returns the first result
-    ///
-    /// This is used to execute DBCommands. For finding `Document`s we recommend the `find` command
-    ///
-    /// For more information: https://docs.mongodb.com/manual/reference/mongodb-wire-protocol/
-    ///
-    /// - parameter query: The `Document` that we're matching against in this `Collection`
-    /// - parameter flags: The Query Flags that we'll use for this query
-    /// - parameter fetchChunkSize: The initial amount of returned Documents. We recommend at least one Document.
-    ///
-    /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    ///
-    /// - returns: The first `Document` in the Response
-    public func queryOne(matching filter: Document = [], usingFlags flags: QueryFlags = []) throws -> Document? {
-        return try self.query(matching: filter, usingFlags: flags, fetching: 1).makeIterator().next()
-    }
-    
-    
-    /// Queries this collection with a Document (which comes from the Query)
-    ///
-    /// This is used to execute DBCommands. For finding `Document`s we recommend the `find` command
-    ///
-    /// For more information: https://docs.mongodb.com/manual/reference/mongodb-wire-protocol/
-    ///
-    /// - parameter query: The Query that we're matching against in this collection. This query is from the MongoKitten QueryBuilder.
-    /// - parameter flags: The Query Flags that we'll use for this query
-    /// - parameter fetchChunkSize: The initial amount of returned Documents. We recommend at least one Document.
-    ///
-    /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    ///
-    /// - returns: The first Document in the Response
-    public func queryOne(matching filter: QueryProtocol, usingFlags flags: QueryFlags = []) throws -> Document? {
-        return try self.queryOne(matching: filter.data, usingFlags: flags)
-    }
-    
+        
     /// Finds `Document`s in this `Collection`
     ///
     /// Can be used to execute DBCommands in MongoDB 2.6 and below. Be careful!
@@ -300,37 +182,33 @@ public final class Collection {
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     ///
     /// - returns: A cursor pointing to the found Documents
-    public func find(matching filter: Document? = nil, sortedBy sort: Document? = nil, projecting projection: Document? = nil, skipping skip: Int32? = nil, limitedTo limit: Int32? = nil, withBatchSize batchSize: Int32 = 10) throws -> Cursor<Document> {
+    public func find(matching filter: Document? = nil, sortedBy sort: Document? = nil, projecting projection: Projection? = nil, skipping skip: Int32? = nil, limitedTo limit: Int32? = nil, withBatchSize batchSize: Int32 = 10) throws -> Cursor<Document> {
         let protocolVersion = database.server.serverData?.maxWireVersion ?? 0
         
         if protocolVersion >= 4 {
-            var command: Document = ["find": .string(self.name)]
+            var command: Document = ["find": self.name]
             
             if let filter = filter {
-                command["filter"] = .document(filter)
+                command["filter"] = filter
             }
             
             if let sort = sort {
-                command["sort"] = .document(sort)
+                command["sort"] = sort
             }
             
             if let projection = projection {
-                command["projection"] = .document(projection)
+                command["projection"] = projection
             }
             
             if let skip = skip {
-                command["skip"] = .int32(skip)
+                command["skip"] = Int32(skip)
             }
             
             if let limit = limit {
-                command["limit"] = .int32(limit)
+                command["limit"] = Int32(limit)
             }
             
-            command["batchSize"] = .int32(10)
-            
-            if let sort = sort {
-                command["sort"] = .document(sort)
-            }
+            command["batchSize"] = Int32(batchSize)
             
             let reply = try database.execute(command: command)
             
@@ -338,26 +216,29 @@ public final class Collection {
                 throw InternalMongoError.incorrectReply(reply: reply)
             }
             
-            guard let responseDoc = documents.first, let cursorDoc = responseDoc["cursor"].documentValue else {
+            guard let responseDoc = documents.first, let cursorDoc = responseDoc["cursor"] as? Document else {
                 throw MongoError.invalidResponse(documents: documents)
             }
             
-            return try Cursor(cursorDocument: cursorDoc, server: database.server, chunkSize: 10, transform: { doc in
-                _ = try? self.handleCallback(forDocuments: [doc], inOperation: .find)
+            return try Cursor(cursorDocument: cursorDoc, collection: self, chunkSize: 10, transform: { doc in
                 return doc
             })
         } else {
-            let queryMsg = Message.Query(requestID: database.server.nextMessageID(), flags: [], collection: self, numbersToSkip: skip ?? 0, numbersToReturn: batchSize, query: filter ?? [], returnFields: projection)
+            let connection = try database.server.reserveConnection()
             
-            let id = try self.database.server.send(message: queryMsg)
-            let reply = try self.database.server.await(response: id)
+            defer {
+                database.server.returnConnection(connection)
+            }
+            
+            let queryMsg = Message.Query(requestID: database.server.nextMessageID(), flags: [], collection: self, numbersToSkip: skip ?? 0, numbersToReturn: batchSize, query: filter ?? [], returnFields: projection?.document)
+            
+            let reply = try self.database.server.sendAndAwait(message: queryMsg, overConnection: connection)
             
             guard case .Reply(_, _, _, let cursorID, _, _, let documents) = reply else {
                 throw InternalMongoError.incorrectReply(reply: reply)
             }
             
-            return Cursor(namespace: self.fullName, server: database.server, cursorID: cursorID, initialData: documents, chunkSize: batchSize, transform: { doc in
-                _ = try? self.handleCallback(forDocuments: [doc], inOperation: .find)
+            return Cursor(namespace: self.fullName, collection: self, cursorID: cursorID, initialData: documents, chunkSize: batchSize, transform: { doc in
                 return doc
             })
         }
@@ -379,8 +260,8 @@ public final class Collection {
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     ///
     /// - returns: A cursor pointing to the found Documents
-    public func find(matching filter: QueryProtocol, sortedBy sort: Document? = nil, projecting projection: Document? = nil, skipping skip: Int32? = nil, limitedTo limit: Int32? = nil, withBatchSize batchSize: Int32 = 0) throws -> Cursor<Document> {
-        return try find(matching: filter.data as Document?, sortedBy: sort, projecting: projection, skipping: skip, limitedTo: limit, withBatchSize: batchSize)
+    public func find(matching filter: QueryProtocol, sortedBy sort: Document? = nil, projecting projection: Projection? = nil, skipping skip: Int32? = nil, limitedTo limit: Int32? = nil, withBatchSize batchSize: Int32 = 0) throws -> Cursor<Document> {
+        return try find(matching: filter.queryDocument as Document?, sortedBy: sort, projecting: projection, skipping: skip, limitedTo: limit, withBatchSize: batchSize)
     }
     
     /// Finds Documents in this collection
@@ -397,7 +278,7 @@ public final class Collection {
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     ///
     /// - returns: The found Document
-    public func findOne(matching filter: Document? = nil, sortedBy sort: Document? = nil, projecting projection: Document? = nil, skipping skip: Int32? = nil) throws -> Document? {
+    public func findOne(matching filter: Document? = nil, sortedBy sort: Document? = nil, projecting projection: Projection? = nil, skipping skip: Int32? = nil) throws -> Document? {
         return try self.find(matching: filter, sortedBy: sort, projecting: projection, skipping: skip, limitedTo:
             1).makeIterator().next()
     }
@@ -416,8 +297,8 @@ public final class Collection {
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     ///
     /// - returns: The found Document
-    public func findOne(matching filter: QueryProtocol, sortedBy sort: Document? = nil, projecting projection: Document? = nil, skipping skip: Int32? = nil) throws -> Document? {
-        return try findOne(matching: filter.data as Document?, sortedBy: sort, projecting: projection, skipping: skip)
+    public func findOne(matching filter: QueryProtocol, sortedBy sort: Document? = nil, projecting projection: Projection? = nil, skipping skip: Int32? = nil) throws -> Document? {
+        return try findOne(matching: filter.queryDocument as Document?, sortedBy: sort, projecting: projection, skipping: skip)
     }
     
     // Update
@@ -439,26 +320,29 @@ public final class Collection {
     /// - parameter ordered: If true, stop updating when one operation fails - defaults to true
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func update(_ updates: [(filter: Document, to: Document, upserting: Bool, multiple: Bool)], stoppingOnError ordered: Bool? = nil) throws {
+    ///
+    /// - returns: The amount of updated documents
+    @discardableResult
+    public func update(_ updates: [(filter: Document, to: Document, upserting: Bool, multiple: Bool)], stoppingOnError ordered: Bool? = nil) throws -> Int {
         let protocolVersion = database.server.serverData?.maxWireVersion ?? 0
         
         if protocolVersion >= 2 {
-            var command: Document = ["update": .string(self.name)]
+            var command: Document = ["update": self.name]
             var newUpdates = [Value]()
             
             for u in updates {
                 newUpdates.append([
-                                      "q": .document(u.filter),
-                                      "u": .document(u.to),
-                                      "upsert": .boolean(u.upserting),
-                                      "multi": .boolean(u.multiple)
+                                      "q": u.filter,
+                                      "u": u.to,
+                                      "upsert": u.upserting,
+                                      "multi": u.multiple
                     ])
             }
             
-            command["updates"] = .array(Document(array: newUpdates))
+            command["updates"] = Document(array: newUpdates)
             
             if let ordered = ordered {
-                command["ordered"] = .boolean(ordered)
+                command["ordered"] = ordered
             }
             
             let reply = try self.database.execute(command: command)
@@ -466,12 +350,18 @@ public final class Collection {
                 throw MongoError.updateFailure(updates: updates, error: nil)
             }
             
-            guard documents.first?["ok"].int32 == 1 else {
+            guard documents.first?["ok"] == 1 else {
                 throw MongoError.updateFailure(updates: updates, error: documents.first)
             }
             
-            try self.handleCallback(forDocuments: updates.map { $0.to }, inOperation: .update)
+            return Int(documents.first?["nModified"]?.int32 ?? 0)
         } else {
+            let connection = try database.server.reserveConnection()
+            
+            defer {
+                database.server.returnConnection(connection)
+            }
+            
             for update in updates {
                 var flags: UpdateFlags = []
                 
@@ -486,9 +376,10 @@ public final class Collection {
                 }
                 
                 let message = Message.Update(requestID: database.server.nextMessageID(), collection: self, flags: flags, findDocument: update.filter, replaceDocument: update.to)
-                try self.database.server.send(message: message)
-                try self.handleCallback(forDocuments: updates.map { $0.to }, inOperation: .update)
+                try self.database.server.send(message: message, overConnection: connection)
             }
+            
+            return updates.count
         }
     }
     
@@ -506,7 +397,8 @@ public final class Collection {
     /// - parameter ordered: If true, stop updating when one operation fails - defaults to true
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func update(matching filter: Document, to updated: Document, upserting upsert: Bool = false, multiple multi: Bool = false, stoppingOnError ordered: Bool? = nil) throws {
+    @discardableResult
+    public func update(matching filter: Document, to updated: Document, upserting upsert: Bool = false, multiple multi: Bool = false, stoppingOnError ordered: Bool? = nil) throws -> Int {
         return try self.update([(filter: filter as QueryProtocol, to: updated, upserting: upsert, multiple: multi)], stoppingOnError: ordered)
     }
     
@@ -525,10 +417,13 @@ public final class Collection {
     /// - parameter ordered: If true, stop updating when one operation fails - defaults to true
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func update(_ updates: [(filter: QueryProtocol, to: Document, upserting: Bool, multiple: Bool)], stoppingOnError ordered: Bool? = nil) throws {
-        let newUpdates = updates.map { (filter: $0.filter.data, to: $0.to, upserting: $0.upserting, multiple: $0.multiple) }
+    ///
+    /// - returns: The amount of updated documents
+    @discardableResult
+    public func update(_ updates: [(filter: QueryProtocol, to: Document, upserting: Bool, multiple: Bool)], stoppingOnError ordered: Bool? = nil) throws -> Int {
+        let newUpdates = updates.map { (filter: $0.filter.queryDocument, to: $0.to, upserting: $0.upserting, multiple: $0.multiple) }
         
-        try self.update(newUpdates, stoppingOnError: ordered)
+        return try self.update(newUpdates, stoppingOnError: ordered)
     }
     
     /// Updates a `Document` using a counterpart `Document`.
@@ -545,8 +440,9 @@ public final class Collection {
     /// - parameter ordered: If true, stop updating when one operation fails - defaults to true
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func update(matching filter: QueryProtocol, to updated: Document, upserting upsert: Bool = false, multiple multi: Bool = false, stoppingOnError ordered: Bool? = nil) throws {
-        return try self.update([(filter: filter, to: updated, upserting: upsert, multiple: multi)], stoppingOnError: ordered)
+    @discardableResult
+    public func update(matching filter: QueryProtocol, to updated: Document, upserting upsert: Bool = false, multiple multi: Bool = false, stoppingOnError ordered: Bool? = nil) throws -> Int {
+        return try self.update([(filter: filter.queryDocument, to: updated, upserting: upsert, multiple: multi)], stoppingOnError: ordered)
     }
     
     // Delete
@@ -559,35 +455,44 @@ public final class Collection {
     /// - parameter stoppingOnError: If true, stop removing when one operation fails - defaults to true
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func remove(matching removals: [(filter: Document, limit: Int32)], stoppingOnError ordered: Bool? = nil) throws {
+    @discardableResult
+    public func remove(matching removals: [(filter: Document, limit: Int32)], stoppingOnError ordered: Bool? = nil) throws -> Int {
         let protocolVersion = database.server.serverData?.maxWireVersion ?? 0
         
         if protocolVersion >= 2 {
-            var command: Document = ["delete": .string(self.name)]
+            var command: Document = ["delete": self.name]
             var newDeletes = [Value]()
             
             for d in removals {
                 newDeletes.append([
-                                      "q": .document(d.filter),
-                                      "limit": .int32(d.limit)
+                                      "q": d.filter,
+                                      "limit": d.limit
                     ])
             }
             
-            command["deletes"] = .array(Document(array: newDeletes))
+            command["deletes"] = Document(array: newDeletes)
             
             if let ordered = ordered {
-                command["ordered"] = .boolean(ordered)
+                command["ordered"] = ordered
             }
             
             let reply = try self.database.execute(command: command)
             let documents = try allDocuments(in: reply)
             
-            guard documents.first?["ok"].int32 == 1 else {
+            guard let document = documents.first, document["ok"] == 1 else {
                 throw MongoError.removeFailure(removals: removals, error: documents.first)
             }
-            try self.handleCallback(forDocuments: removals.map { $0.filter }, inOperation: .delete)
+            
+            return document["n"]?.int ?? 0
+            
         // If we're talking to an older MongoDB server
         } else {
+            let connection = try database.server.reserveConnection()
+            
+            defer {
+                database.server.returnConnection(connection)
+            }
+            
             for removal in removals {
                 var flags: DeleteFlags = []
                 
@@ -604,10 +509,11 @@ public final class Collection {
                 let message = Message.Delete(requestID: database.server.nextMessageID(), collection: self, flags: flags, removeDocument: removal.filter)
                 
                 for _ in 0..<limit {
-                    try self.database.server.send(message: message)
-                    try self.handleCallback(forDocuments: [removal.filter], inOperation: .delete)
+                    try self.database.server.send(message: message, overConnection: connection)
                 }
             }
+            
+            return removals.count
         }
     }
     
@@ -619,10 +525,11 @@ public final class Collection {
     /// - parameter stoppingOnError: If true, stop removing when one operation fails - defaults to true
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func remove(matching removals: [(filter: QueryProtocol, limit: Int32)], stoppingOnError ordered: Bool? = nil) throws {
-        let newRemovals = removals.map { (filter: $0.filter.data, limit: $0.limit) }
+    @discardableResult
+    public func remove(matching removals: [(filter: QueryProtocol, limit: Int32)], stoppingOnError ordered: Bool? = nil) throws -> Int {
+        let newRemovals = removals.map { (filter: $0.filter.queryDocument, limit: $0.limit) }
         
-        try self.remove(matching: newRemovals, stoppingOnError: ordered)
+        return try self.remove(matching: newRemovals, stoppingOnError: ordered)
     }
     
     /// Removes `Document`s matching the `filter` until the `limit` is reached
@@ -634,8 +541,9 @@ public final class Collection {
     /// - parameter stoppingOnError: If true, stop removing when one operation fails - defaults to true
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func remove(matching filter: Document, limitedTo limit: Int32 = 0, stoppingOnError ordered: Bool? = nil) throws {
-        try self.remove(matching: [(filter: filter as QueryProtocol, limit: limit)], stoppingOnError: ordered)
+    @discardableResult
+    public func remove(matching filter: Document, limitedTo limit: Int32 = 0, stoppingOnError ordered: Bool? = nil) throws -> Int {
+        return try self.remove(matching: [(filter: filter as QueryProtocol, limit: limit)], stoppingOnError: ordered)
     }
     
     /// Removes `Document`s matching the `filter` until the `limit` is reached
@@ -647,8 +555,9 @@ public final class Collection {
     /// - parameter stoppingOnError: If true, stop removing when one operation fails - defaults to true
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func remove(matching filter: QueryProtocol, limitedTo limit: Int32 = 0, stoppingOnError ordered: Bool? = nil) throws {
-        try self.remove(matching: [(filter: filter, limit: limit)], stoppingOnError: ordered)
+    @discardableResult
+    public func remove(matching filter: QueryProtocol, limitedTo limit: Int32 = 0, stoppingOnError ordered: Bool? = nil) throws -> Int {
+        return try self.remove(matching: [(filter: filter, limit: limit)], stoppingOnError: ordered)
     }
     
     /// The drop command removes an entire collection from a database. This command also removes any indexes associated with the dropped collection.
@@ -657,7 +566,7 @@ public final class Collection {
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     public func drop() throws {
-        _ = try self.database.execute(command: ["drop": .string(self.name)])
+        _ = try self.database.execute(command: ["drop": self.name])
     }
     
     /// Changes the name of an existing collection. This method supports renames within a single database only. To move the collection to a different database, use the `move` method on `Collection`.
@@ -668,7 +577,7 @@ public final class Collection {
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     public func rename(to newName: String) throws {
-        try self.move(to: database, named: newName)
+        try self.move(toDatabase: database, renamedTo: newName)
     }
     
     /// Move this collection to another database. Can also rename the collection in one go.
@@ -681,14 +590,14 @@ public final class Collection {
     /// - parameter named: The new name for this collection
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func move(to database: Database, named newName: String? = nil, overwriting dropOldTarget: Bool? = nil) throws {
+    public func move(toDatabase database: Database, renamedTo newName: String? = nil, overwritingExistingCollection dropOldTarget: Bool? = nil) throws {
         // TODO: Fail if the target database exists.
         var command: Document = [
-                                    "renameCollection": .string(self.fullName),
-                                    "to": .string("\(database.name).\(newName ?? self.name)")
+                                    "renameCollection": self.fullName,
+                                    "to": "\(database.name).\(newName ?? self.name)"
         ]
         
-        if let dropOldTarget = dropOldTarget { command["dropTarget"] = .boolean(dropOldTarget) }
+        if let dropOldTarget = dropOldTarget { command["dropTarget"] = dropOldTarget }
         
         _ = try self.database.server["admin"].execute(command: command)
         
@@ -708,18 +617,18 @@ public final class Collection {
     ///
     /// - returns: The amount of matching `Document`s
     public func count(matching filter: Document? = nil, limitedTo limit: Int32? = nil, skipping skip: Int32? = nil) throws -> Int {
-        var command: Document = ["count": .string(self.name)]
+        var command: Document = ["count": self.name]
         
         if let filter = filter {
-            command["query"] = .document(filter)
+            command["query"] = filter
         }
         
         if let skip = skip {
-            command["skip"] = .int32(skip)
+            command["skip"] = Int32(skip)
         }
         
         if let limit = limit {
-            command["limit"] = .int32(limit)
+            command["limit"] = Int32(limit)
         }
         
         let reply = try self.database.execute(command: command)
@@ -728,7 +637,11 @@ public final class Collection {
             throw InternalMongoError.incorrectReply(reply: reply)
         }
         
-        return document["n"].int
+        guard let n = document["n"]?.int else {
+            throw InternalMongoError.incorrectReply(reply: reply)
+        }
+        
+        return n
     }
     
     /// `findAndModify` only has two operations that can be used. Update and Delete
@@ -758,37 +671,37 @@ public final class Collection {
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     ///
     /// - returns: The `Value` received from the server as specified in the link of the additional information
-    public func findAndModify(matching query: QueryProtocol? = nil, sortedBy sort: Document? = nil, action: FindAndModifyOperation, projection: Document? = nil) throws -> Value {
-        var command: Document = ["findAndModify": .string(self.name)]
+    public func findAndModify(matching query: QueryProtocol? = nil, sortedBy sort: Sort? = nil, action: FindAndModifyOperation, projection: Projection? = nil) throws -> ValueConvertible {
+        var command: Document = ["findAndModify": self.name]
         
         if let query = query {
-            command["query"] = ~query.data
+            command["query"] = query.queryDocument
         }
         
         if let sort = sort {
-            command["sort"] = ~sort
+            command["sort"] = sort
         }
         
         switch action {
         case .remove:
             command["remove"] = true
         case .update(let with, let new, let upsert):
-            command["update"] = ~with
-            command["new"] = ~new
-            command["upsert"] = ~upsert
+            command["update"] = with
+            command["new"] = new
+            command["upsert"] = upsert
         }
         
         if let projection = projection {
-            command["fields"] = ~projection
+            command["fields"] = projection
         }
         
         let document = try firstDocument(in: try database.execute(command: command))
         
-        guard document["ok"].int32 == 1 else {
+        guard document["ok"] == 1 else {
             throw MongoError.commandFailure(error: document) 
         }
         
-        return document["value"]
+        return document["value"] ?? Null()
     }
     
     /// Counts the amount of `Document`s matching the `filter`. Stops counting when the `limit` it reached
@@ -803,7 +716,7 @@ public final class Collection {
     ///
     /// - returns: The amount of matching `Document`s
     public func count(matching query: QueryProtocol, limitedTo limit: Int32? = nil, skipping skip: Int32? = nil) throws -> Int {
-        return try count(matching: query.data as Document?, limitedTo: limit, skipping: skip)
+        return try count(matching: query.queryDocument as Document?, limitedTo: limit, skipping: skip)
     }
     
     /// Returns all distinct values for a key in this collection. Allows filtering using query
@@ -816,14 +729,14 @@ public final class Collection {
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     ///
     /// - returns: A list of all distinct values for this key
-    public func distinct(on key: String, usingFilter filter: Document? = nil) throws -> [Value]? {
-        var command: Document = ["distinct": .string(self.name), "key": .string(key)]
+    public func distinct(onField key: String, usingFilter filter: Document? = nil) throws -> [ValueConvertible]? {
+        var command: Document = ["distinct": self.name, "key": key]
         
         if let filter = filter {
-            command["query"] = .document(filter)
+            command["query"] = filter
         }
         
-        return try firstDocument(in: try self.database.execute(command: command))["values"].document.arrayValue
+        return try firstDocument(in: try self.database.execute(command: command))["values"]?.document.arrayValue ?? []
     }
     
     /// Returns all distinct values for a key in this collection. Allows filtering using query
@@ -836,8 +749,8 @@ public final class Collection {
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     ///
     /// - returns: A list of all distinct values for this key
-    public func distinct(on key: String, usingFilter query: Query) throws -> [Value]? {
-        return try self.distinct(on: key, usingFilter: query.data)
+    public func distinct(on key: String, usingFilter query: QueryProtocol) throws -> [Value]? {
+        return try self.distinct(on: key, usingFilter: query.queryDocument)
     }
     
     /// Creates an `Index` in this `Collection` on the specified keys.
@@ -851,8 +764,8 @@ public final class Collection {
     /// - parameter unique: Used to create unique fields like usernames. Default should be `false`
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func createIndex(with keys: [(key: String, ascending: Bool)], named name: String, filter: Query?, buildInBackground: Bool, unique: Bool) throws {
-        try self.createIndexes([(name: name, keys: keys, filter: filter, buildInBackground: buildInBackground, unique: unique)])
+    public func createIndex(named name: String, withParameters parameters: IndexParameter...) throws {
+        try self.createIndexes([(name: name, parameters: parameters)])
     }
     
     /// Creates multiple indexes as specified
@@ -862,44 +775,29 @@ public final class Collection {
     /// - parameter indexes: The indexes to create using a Tuple as specified in `createIndex`
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func createIndexes(_ indexes: [(name: String, keys: [(key: String, ascending: Bool)], filter: Query?, buildInBackground: Bool, unique: Bool)]) throws {
+    public func createIndexes(_ indexes: [(name: String, parameters: [IndexParameter])]) throws {
         guard let wireVersion = database.server.serverData?.maxWireVersion , wireVersion >= 2 else {
             throw MongoError.unsupportedOperations
         }
         
-        var indexDocs = [Value]()
+        var indexDocs = [ValueConvertible]()
         
         for index in indexes {
-            var keys: Document = []
-            
-            for key in index.keys {
-                keys[key.key] = key.ascending ? .int32(1) : .int32(-1)
-            }
-            
             var indexDocument: Document = [
-                                              "key": .array(keys),
-                                              "name": .string(index.name)
+                "name": index.name
             ]
             
-            if let filter = index.filter {
-                indexDocument["partialFilterExpression"] = .document(filter.data)
+            for parameter in index.parameters {
+                indexDocument += parameter.document
             }
             
-            if index.buildInBackground {
-                indexDocument["background"] = .boolean(true)
-            }
-            
-            if index.unique {
-                indexDocument["unique"] = .boolean(true)
-            }
-            
-            indexDocs.append(~indexDocument)
+            indexDocs.append(indexDocument)
         }
         
         
-        let document = try firstDocument(in: try database.execute(command: ["createIndexes": .string(self.name), "indexes": .array(Document(array: indexDocs))]))
+        let document = try firstDocument(in: try database.execute(command: ["createIndexes": self.name, "indexes": Document(array: indexDocs)]))
         
-        guard document["ok"].int32 == 1 else {
+        guard document["ok"] == 1 else {
             throw MongoError.commandFailure(error: document) 
         }
     }
@@ -912,8 +810,8 @@ public final class Collection {
     /// - parameter index: The index name (as specified when creating the index) that will removed. `*` for all indexes
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func dropIndex(_ index: String) throws {
-        try database.execute(command: ["dropIndexes": .string(self.name), "index": .string(name)])
+    public func dropIndex(named index: String) throws {
+        try database.execute(command: ["dropIndexes": self.name, "index": name])
     }
     
     /// Lists all indexes for this collection
@@ -928,13 +826,19 @@ public final class Collection {
             throw MongoError.unsupportedOperations
         }
         
-        let result = try firstDocument(in: try database.execute(command: ["listIndexes": .string(self.name)]))
+        let result = try firstDocument(in: try database.execute(command: ["listIndexes": self.name]))
         
-        guard let cursorDocument = result["cursor"].documentValue else {
+        guard let cursorDocument = result["cursor"] as? Document else {
             throw MongoError.cursorInitializationError(cursorDocument: result)
         }
         
-        return try Cursor(cursorDocument: cursorDocument, server: database.server, chunkSize: 10, transform: { $0 })
+        let connection = try database.server.reserveConnection()
+        
+        defer {
+            database.server.returnConnection(connection)
+        }
+        
+        return try Cursor(cursorDocument: cursorDocument, collection: self, chunkSize: 10, transform: { $0 })
     }
     
     /// Modifies the collection. Requires access to `collMod`
@@ -954,11 +858,11 @@ public final class Collection {
             throw MongoError.commandError(error: "Cannot execute modify() on \(self.description): document `flags` contains prohibited key `collMod`.")
         }
         
-        let command = ["collMod": ~self.name] as Document
+        let command = ["collMod": self.name] as Document
         
         let result = try firstDocument(in: database.execute(command: command))
         
-        guard result["ok"].int == 1 else {
+        guard result["ok"] == 1 else {
             throw MongoError.commandFailure(error: result)
         }
     }
@@ -976,13 +880,13 @@ public final class Collection {
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     ///
     /// - returns: A `Cursor` pointing to the found `Document`s
-    public func aggregate(pipeline pipeLine: Document, explain: Bool? = nil, allowDiskUse: Bool? = nil, cursorOptions: Document = ["batchSize":10], bypassDocumentValidation: Bool? = nil) throws -> Cursor<Document> {
+    public func aggregate(pipeline pipeLine: Pipeline, explain: Bool? = nil, allowDiskUse: Bool? = nil, cursorOptions: Document = ["batchSize":10], bypassDocumentValidation: Bool? = nil) throws -> Cursor<Document> {
         // construct command. we always use cursors in MongoKitten, so that's why the default value for cursorOptions is an empty document.
-        var command: Document = ["aggregate": .string(self.name), "pipeline": .array(pipeLine), "cursor": .document(cursorOptions)]
+        var command: Document = ["aggregate": self.name, "pipeline": pipeLine.document, "cursor": cursorOptions]
         
-        if let explain = explain { command["explain"] = .boolean(explain) }
-        if let allowDiskUse = allowDiskUse { command["allowDiskUse"] = .boolean(allowDiskUse) }
-        if let bypassDocumentValidation = bypassDocumentValidation { command["bypassDocumentValidation"] = .boolean(bypassDocumentValidation) }
+        if let explain = explain { command["explain"] = explain }
+        if let allowDiskUse = allowDiskUse { command["allowDiskUse"] = allowDiskUse }
+        if let bypassDocumentValidation = bypassDocumentValidation { command["bypassDocumentValidation"] = bypassDocumentValidation }
         
         // execute and construct cursor
         let reply = try database.execute(command: command)
@@ -991,11 +895,11 @@ public final class Collection {
             throw InternalMongoError.incorrectReply(reply: reply)
         }
         
-        guard let responseDoc = documents.first, let cursorDoc = responseDoc["cursor"].documentValue else {
+        guard let responseDoc = documents.first, let cursorDoc = responseDoc["cursor"] as? Document else {
             throw MongoError.invalidResponse(documents: documents)
         }
         
-        return try Cursor(cursorDocument: cursorDoc, server: database.server, chunkSize: 10, transform: { $0 })
+        return try Cursor(cursorDocument: cursorDoc, collection: self, chunkSize: 10, transform: { $0 })
     }
     
     /// The touch command loads data from the data storage layer into memory.
@@ -1009,14 +913,14 @@ public final class Collection {
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions, the storage engine doesn't support `touch` or an error occurred  
     public func touch(data touchData: Bool, index touchIndexes: Bool) throws {
         let command: Document = [
-                                    "touch": ~self.name,
-                                    "data": ~touchData,
-                                    "index": ~touchIndexes
+                                    "touch": self.name,
+                                    "data": touchData,
+                                    "index": touchIndexes
         ]
         
         let document = try firstDocument(in: try database.execute(command: command))
         
-        guard document["ok"].int32 == 1 else {
+        guard document["ok"] == 1 else {
             throw MongoError.commandFailure(error: document) 
         }
     }
@@ -1030,15 +934,15 @@ public final class Collection {
     /// For more information: https://docs.mongodb.com/manual/reference/command/convertToCapped/#dbcmd.convertToCapped
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func convertToCapped(at cap: Int32) throws {
+    public func convertToCapped(cappingAt cap: Int32) throws {
         let command: Document = [
-                                    "convertToCapped": ~self.name,
-                                    "size": ~cap
+                                    "convertToCapped": self.name,
+                                    "size": Int32(cap).makeBsonValue()
         ]
         
         let document = try firstDocument(in: try database.execute(command: command))
         
-        guard document["ok"].int32 == 1 else {
+        guard document["ok"] == 1 else {
             throw MongoError.commandFailure(error: document) 
         }
     }
@@ -1052,12 +956,12 @@ public final class Collection {
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     public func reIndex() throws {
         let command: Document = [
-                                    "reIndex": ~self.name
+                                    "reIndex": self.name
         ]
         
         let document = try firstDocument(in: try database.execute(command: command))
         
-        guard document["ok"].int32 == 1 else {
+        guard document["ok"] == 1 else {
             throw MongoError.commandFailure(error: document) 
         }
     }
@@ -1073,16 +977,16 @@ public final class Collection {
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
     public func compact(forced force: Bool? = nil) throws {
         var command: Document = [
-                                    "compact": ~self.name
+                                    "compact": self.name
         ]
         
         if let force = force {
-            command["force"] = ~force
+            command["force"] = force
         }
         
         let document = try firstDocument(in: try database.execute(command: command))
         
-        guard document["ok"].int32 == 1 else {
+        guard document["ok"] == 1 else {
             throw MongoError.commandFailure(error: document) 
         }
     }
@@ -1095,8 +999,8 @@ public final class Collection {
     /// - parameter capped: The cap to apply
     ///
     /// - throws: When we can't send the request/receive the response, you don't have sufficient permissions or an error occurred
-    public func clone(to otherCollection: String, capped: Int32) throws {
-        try database.clone(collection: self, to: otherCollection, capped: capped)
+    public func clone(named otherCollection: String, capped: Int32) throws {
+        try database.clone(collection: self, named: otherCollection, cappedTo: capped)
     }
 }
 

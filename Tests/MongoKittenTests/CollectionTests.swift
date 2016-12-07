@@ -8,8 +8,8 @@
 
 import XCTest
 import MongoKitten
-import MongoPBKDF2
-import MongoSHA1
+import CryptoKitten
+import Dispatch
 
 class CollectionTests: XCTestCase {
     static var allTests: [(String, (CollectionTests) -> () throws -> Void)] {
@@ -34,13 +34,42 @@ class CollectionTests: XCTestCase {
         // Put teardown code here. This method is called after the invocation of each test method in the class.
     }
     
-    func testDistinct() {
-        let distinct = try! TestManager.db["zips"].distinct(on: "state")!
+    func testDistinct() throws {
+        let distinct = try TestManager.db["zips"].distinct(onField: "state")!
         
         XCTAssertEqual(distinct.count, 51)
     }
     
-    func testFind() {
+//    func testPerformance() throws {
+//        let collection = TestManager.db["zips"]
+//        var documents = [Document]()
+//        documents.reserveCapacity(29353)
+//        
+//        func testQueue(max: Int = 10) {
+//            let perQueue = 25_000 / max
+//            
+//            for i in 0..<max {
+//                let start = i * perQueue
+//                
+//                let q = DispatchQueue(label: "org.openkitten.tests.performance.\(i)")
+//                let e = expectation(description: "kaas \(i)")
+//                
+//                q.async {
+//                    for j in start..<start+perQueue {
+//                        _ = try! collection.findOne(skipping: Int32(j))
+//                    }
+//                    
+//                    e.fulfill()
+//                }
+//            }
+//        }
+//        
+//        testQueue()
+//        
+//        waitForExpectations(timeout: 300)
+//    }
+    
+    func testFind() throws {
         let base: Document = ["username": "bob", "age": 25, "kittens": 6, "dogs": 0, "beers": 90]
         
         var inserts: [Document]
@@ -61,54 +90,105 @@ class CollectionTests: XCTestCase {
         
         inserts = [base, brokenUsername, brokenUsername, brokenAge, brokenDogs, brokenKittens, brokenKittens2, brokenBeers, base]
         
-        _ = try! TestManager.wcol.insert(inserts)
+        _ = try TestManager.wcol.insert(inserts)
         
         let query: Query = ("username" == "henk" || "username" == "bob") && "age" > 24 && "kittens" >= 2 && "kittens" != 3 && "dogs" <= 1 && "beers" < 100
         
-        let response = Array(try! TestManager.wcol.find(matching: query))
+        let response = Array(try TestManager.wcol.find(matching: query))
         
-        let response2 = try! TestManager.wcol.findOne(matching: query)!
+        let response2 = try TestManager.wcol.findOne(matching: query)!
         
         XCTAssertEqual(response.count, 2)
         
         XCTAssertEqual(response.first, response2)
         
-        runContainsQuery()
-        runContainsCaseInsensitiveQuery()
-        runStartsWithQuery()
-        runEndsWithQuery()
+        try runContainsQuery()
+        try runContainsCaseInsensitiveQuery()
+        try runStartsWithQuery()
+        try runEndsWithQuery()
     }
     
-    private func runContainsQuery() {
-        let query = Query(aqt: .contains(key: "username", val: "ar", options:""))
-        let response = Array(try! TestManager.wcol.find(matching: query))
-        XCTAssert(response.count == 2)
+    func testDBRef() throws {
+        let colA = TestManager.db["collectionA"]
+        let colB = TestManager.db["collectionB"]
+        
+        let id = try colA.insert(["name": "Harrie Bob"])
+        
+        let dbref = DBRef(referencing: id, inCollection: colA)
+        
+        let referenceID = try colB.insert(["reference": dbref])
+        
+        guard let reference = try colB.findOne(matching: "_id" == referenceID) else {
+            XCTFail()
+            return
+        }
+        
+        guard let colAreference = DBRef(reference["reference"]?.document ?? [:], inDatabase: TestManager.db) else {
+            XCTFail()
+            return
+        }
+        
+        guard let originalDocument = try colAreference.resolve() else {
+            XCTFail()
+            return
+        }
+        
+        XCTAssertEqual(originalDocument["name"] as? String, "Harrie Bob")
     }
-
-    private func runContainsCaseInsensitiveQuery() {
-        let query = Query(aqt: .contains(key: "username", val: "AR", options:"i"))
-        let response = Array(try! TestManager.wcol.find(matching: query))
+    
+    func testProjection() {
+        let projection: Projection = ["name", "age", "awesome"]
+        
+        XCTAssertEqual(projection.makeBsonValue(), ["name": Int32(1), "age": Int32(1), "awesome": Int32(1)])
+        
+        let projection2: Projection = ["henk": true, "bob": 1]
+        
+        XCTAssertEqual(projection2.document, ["henk": true, "bob": 1])
+    }
+    
+    func testIndexes() throws {
+        try TestManager.wcol.createIndex(named: "henkbob", withParameters: .sortedCompound(fields: [("name", .ascending), ("age", .descending)]), .expire(afterSeconds: 1), .buildInBackground)
+        
+        for index in try TestManager.wcol.listIndexes() where index["name"] as? String == "henkbob" {
+            return
+        }
+        
+        XCTFail()
+    }
+    
+    private func runContainsQuery() throws {
+        let query = Query(aqt: .contains(key: "username", val: "ar", options: ""))
+        let response = Array(try TestManager.wcol.find(matching: query))
         XCTAssert(response.count == 2)
     }
     
-
-    private func runStartsWithQuery() {
+    private func runStartsWithQuery() throws {
         let query = Query(aqt: .startsWith(key: "username", val: "har"))
-        let response = Array(try! TestManager.wcol.find(matching: query))
+        let response = Array(try TestManager.wcol.find(matching: query))
         XCTAssert(response.count == 2)
     }
     
-    private func runEndsWithQuery() {
+    private func runEndsWithQuery() throws {
         let query = Query(aqt: .endsWith(key: "username", val: "rrie"))
-        let response = Array(try! TestManager.wcol.find(matching: query))
+        let response = Array(try TestManager.wcol.find(matching: query))
         XCTAssert(response.count == 2)
     }
     
-    func testAggregate() {
-        let cursor = try! TestManager.db["zips"].aggregate(pipeline: [
-                                             [ "$group": [ "_id": "$state", "totalPop": [ "$sum": "$pop" ] ] ],
-                                             [ "$match": [ "totalPop": [ "$gte": ~10_000_000 ] ] ]
-        ])
+    private func runContainsCaseInsensitiveQuery() throws {
+        let query = Query(aqt: .contains(key: "username", val: "AR", options:"i"))
+        let response = Array(try TestManager.wcol.find(matching: query))
+        XCTAssert(response.count == 2)
+    }
+
+    func testAggregate() throws {
+        let pipeline = Pipeline([
+            [ "$group":
+                [ "_id": "$state", "totalPop": [ "$sum": "$pop" ] as Document ] as Document ]as Document,
+                [ "$match": [ "totalPop": [ "$gte": Int(10_000_000).makeBsonValue() ] as Document ] as Document ] as Document
+            ]
+        )
+        
+        let cursor = try TestManager.db["zips"].aggregate(pipeline: pipeline)
         
         var count = 0
         for _ in cursor {
@@ -118,7 +198,7 @@ class CollectionTests: XCTestCase {
         XCTAssert(count == 7)
     }
     
-    func testUpdate() {
+    func testUpdate() throws {
         let base: Document = ["username": "bob", "age": 25, "kittens": 6, "dogs": 0, "beers": 90]
         
         var inserts: [Document]
@@ -138,22 +218,22 @@ class CollectionTests: XCTestCase {
         brokenBeers["beers"] = "broken"
         
         inserts = [base, brokenUsername, brokenUsername, brokenAge, brokenDogs, brokenKittens, brokenKittens2, brokenBeers, base]
-        try! TestManager.wcol.insert(inserts)
+        try TestManager.wcol.insert(inserts)
         
         let query: Query = ("username" == "henk" || "username" == "bob") && "age" > 24 && "kittens" >= 2 && "kittens" != 3 && "dogs" <= 1 && "beers" < 100
         
-        try! TestManager.wcol.update(matching: query, to: ["testieBool": true])
+        try TestManager.wcol.update(matching: query, to: ["testieBool": true])
         
-        try! TestManager.server.fsync()
+        try TestManager.server.fsync()
         
-        let response = Array(try! TestManager.wcol.find(matching: "testieBool" == true))
+        let response = Array(try TestManager.wcol.find(matching: "testieBool" == true))
         XCTAssertEqual(response.count, 1)
         
-        let response2 = Array(try! TestManager.wcol.find(matching: query))
+        let response2 = Array(try TestManager.wcol.find(matching: query))
         XCTAssertEqual(response2.count, 1)
     }
     
-    func testRemovingAll() {
+    func testRemovingAll() throws {
         let base: Document = ["username": "bob", "age": 25, "kittens": 6, "dogs": 0, "beers": 90]
         
         var inserts: [Document]
@@ -174,18 +254,18 @@ class CollectionTests: XCTestCase {
         
         inserts = [base, brokenUsername, brokenUsername, brokenAge, brokenDogs, brokenKittens, brokenKittens2, brokenBeers, base]
         
-        _ = try! TestManager.wcol.insert(inserts)
+        _ = try TestManager.wcol.insert(inserts)
         
         let query: Query = ("username" == "henk" || "username" == "bob") && "age" > 24 && "kittens" >= 2 && "kittens" != 3 && "dogs" <= 1 && "beers" < 100
         
-        try! TestManager.wcol.remove(matching: query)
+        XCTAssertGreaterThan(try TestManager.wcol.remove(matching: query), 0)
         
-        let response = Array(try! TestManager.wcol.find(matching: query))
+        let response = Array(try TestManager.wcol.find(matching: query))
         
         XCTAssertEqual(response.count, 0)
     }
     
-    func testRemovingOne() {
+    func testRemovingOne() throws {
         let base: Document = ["username": "bob", "age": 25, "kittens": 6, "dogs": 0, "beers": 90]
         
         var inserts: [Document]
@@ -206,24 +286,15 @@ class CollectionTests: XCTestCase {
         
         inserts = [base, brokenUsername, brokenUsername, brokenAge, brokenDogs, brokenKittens, brokenKittens2, brokenBeers, base]
         
-        try! TestManager.wcol.insert(inserts)
+        try TestManager.wcol.insert(inserts)
         
         let query: Query = ("username" == "henk" || "username" == "bob") && "age" > 24 && "kittens" >= 2 && "kittens" != 3 && "dogs" <= 1 && "beers" < 100
         
-        try! TestManager.wcol.remove(matching: query, limitedTo: 1)
-        try! TestManager.server.fsync()
+        XCTAssertEqual(try TestManager.wcol.remove(matching: query, limitedTo: 1), 1)
+        try TestManager.server.fsync()
         
-        let response = Array(try! TestManager.wcol.find(matching: query))
+        let response = Array(try TestManager.wcol.find(matching: query))
         
         XCTAssertEqual(response.count, 1)
-    }
-
-func testPBKDF2() {
-//        let pass = NSData(bytes: [UInt8]("hunter2".utf8))
-//        let salt = [UInt8]("sdasdsazxcxzvekfwqiooi".utf8)
-//
-//        measure {
-//            try! PBKDF2<SHA1>.calculate(pass, usingSalt: salt, iterating: 10000)
-//        }
     }
 }

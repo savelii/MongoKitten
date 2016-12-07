@@ -9,16 +9,21 @@
 import Foundation
 import BSON
 
+#if os(macOS)
+    typealias RegularExpression = NSRegularExpression
+#endif
+
+
 // MARK: Equations
 
 /// Equals
 public func ==(key: String, pred: ValueConvertible) -> Query {
-    return Query(aqt: .valEquals(key: key, val: ~pred))
+    return Query(aqt: .valEquals(key: key, val: pred))
 }
 
 /// MongoDB: `$ne`
 public func !=(key: String, pred: ValueConvertible) -> Query {
-    return Query(aqt: .valNotEquals(key: key, val: ~pred))
+    return Query(aqt: .valNotEquals(key: key, val: pred))
 }
 
 // MARK: Comparisons
@@ -29,7 +34,7 @@ public func !=(key: String, pred: ValueConvertible) -> Query {
 ///
 /// - returns: A new `Query` requiring the `Value` in the `key` to be larger than the provided `Value`
 public func >(key: String, pred: ValueConvertible) -> Query {
-    return Query(aqt: .greaterThan(key: key, val: ~pred))
+    return Query(aqt: .greaterThan(key: key, val: pred))
 }
 
 /// MongoDB: `$gte`. Used like native swift `>=`
@@ -38,7 +43,7 @@ public func >(key: String, pred: ValueConvertible) -> Query {
 ///
 /// - returns: A new `Query` requiring the `Value` in the `key` to be larger than or equal to the provided `Value`
 public func >=(key: String, pred: ValueConvertible) -> Query {
-    return Query(aqt: .greaterThanOrEqual(key: key, val: ~pred))
+    return Query(aqt: .greaterThanOrEqual(key: key, val: pred))
 }
 
 /// MongoDB: `$lt`. Used like native swift `<`
@@ -47,7 +52,7 @@ public func >=(key: String, pred: ValueConvertible) -> Query {
 ///
 /// - returns: A new `Query` requiring the `Value` in the `key` to be smaller than the provided `Value`
 public func <(key: String, pred: ValueConvertible) -> Query {
-    return Query(aqt: .smallerThan(key: key, val: ~pred))
+    return Query(aqt: .smallerThan(key: key, val: pred))
 }
 
 /// MongoDB: `$lte`. Used like native swift `<=`
@@ -56,7 +61,7 @@ public func <(key: String, pred: ValueConvertible) -> Query {
 ///
 /// - returns: A new `Query` requiring the `Value` in the `key` to be smaller than or equal to the provided `Value`
 public func <=(key: String, pred: ValueConvertible) -> Query {
-    return Query(aqt: .smallerThanOrEqual(key: key, val: ~pred))
+    return Query(aqt: .smallerThanOrEqual(key: key, val: pred))
 }
 
 /// MongoDB `$and`. Used like native swift `&&`
@@ -115,27 +120,13 @@ public prefix func !(query: Query) -> Query {
 }
 
 public func &=(lhs: QueryProtocol, rhs: QueryProtocol) -> Document {
-    var lhs = lhs.data
+    var lhs = lhs.queryDocument
     
-    for (key, value) in rhs.data {
+    for (key, value) in rhs.queryDocument {
         lhs[key] = value
     }
     
     return lhs
-}
-
-/// A protocol that allows other types to be used as a `Value` replacement
-public protocol ValueProtocol {
-    /// You have to be able to provide a BSON `Value`
-    var val: Value { get }
-}
-
-/// Makes it so that a normal BSON `Value` can be used in statements
-extension Value: ValueProtocol {
-    /// The `Value` in `Value` is `self`
-    public var val: Value {
-        return self
-    }
 }
 
 /// Abstract Query Tree.
@@ -220,36 +211,36 @@ public indirect enum AQT {
                 return aqt.document
                 
             } else {
-                return [key: ["$type": ~type.rawValue]]
+                return [key: ["$type": type.rawValue] as Document]
             }
         case .valEquals(let key, let val):
-            return [key: ["$eq": val.val]]
+            return [key: ["$eq": val] as Document]
         case .valNotEquals(let key, let val):
-            return [key: ["$ne": val.val]]
+            return [key: ["$ne": val] as Document]
         case .greaterThan(let key, let val):
-            return [key: ["$gt": val.val]]
+            return [key: ["$gt": val] as Document]
         case .greaterThanOrEqual(let key, let val):
-            return [key: ["$gte": val.val]]
+            return [key: ["$gte": val] as Document]
         case .smallerThan(let key, let val):
-            return [key: ["$lt": val.val]]
+            return [key: ["$lt": val] as Document]
         case .smallerThanOrEqual(let key, let val):
-            return [key: ["$lte": val.val]]
+            return [key: ["$lte": val] as Document]
         case .and(let aqts):
             let expressions = aqts.map{ Value.document($0.document) }
             
-            return ["$and": .array(Document(array: expressions)) ]
+            return ["$and": Document(array: expressions) ]
         case .or(let aqts):
             let expressions = aqts.map{ Value.document($0.document) }
             
-            return ["$or": .array(Document(array: expressions)) ]
+            return ["$or": Document(array: expressions) ]
         case .not(let aqt):
-            return ["$not": ~aqt.document]
+            return ["$not": aqt.document]
         case .contains(let key, let val, let options):
-            return [key: .regularExpression(pattern: val, options: options)]
+            return [key: Value.regularExpression(pattern: val, options: options)]
         case .startsWith(let key, let val):
-            return [key: .regularExpression(pattern: "^\(val)", options: "m")]
+            return [key: Value.regularExpression(pattern: "^\(val)", options: "m")]
         case .endsWith(let key, let val):
-            return [key: .regularExpression(pattern: "\(val)$", options: "m")]
+            return [key: Value.regularExpression(pattern: "\(val)$", options: "m")]
         case .nothing:
             return []
         }
@@ -259,22 +250,22 @@ public indirect enum AQT {
     case typeof(key: String, type: AQTType)
     
     /// Does the `Value` within the `key` match this `Value`
-    case valEquals(key: String, val: ValueProtocol)
+    case valEquals(key: String, val: ValueConvertible)
     
     /// The `Value` within the `key` does not match this `Value`
-    case valNotEquals(key: String, val: ValueProtocol)
+    case valNotEquals(key: String, val: ValueConvertible)
     
     /// Whether the `Value` within the `key` is greater than this `Value`
-    case greaterThan(key: String, val: ValueProtocol)
+    case greaterThan(key: String, val: ValueConvertible)
     
     /// Whether the `Value` within the `key` is greater than or equal to this `Value`
-    case greaterThanOrEqual(key: String, val: ValueProtocol)
+    case greaterThanOrEqual(key: String, val: ValueConvertible)
     
     /// Whether the `Value` within the `key` is smaller than this `Value`
-    case smallerThan(key: String, val: ValueProtocol)
+    case smallerThan(key: String, val: ValueConvertible)
     
     /// Whether the `Value` within the `key` is smaller than or equal to this `Value`
-    case smallerThanOrEqual(key: String, val: ValueProtocol)
+    case smallerThanOrEqual(key: String, val: ValueConvertible)
     
     /// Whether all `AQT` Conditions are correct
     case and([AQT])
@@ -301,13 +292,13 @@ public indirect enum AQT {
 /// The protocol all queries need to comply to
 public protocol QueryProtocol {
     /// They need to return a `Document` that will be used for matching
-    var data: Document { get }
+    var queryDocument: Document { get }
 }
 
 /// A `Query` that consists of an `AQT` statement
 public struct Query: QueryProtocol {
     /// The `Document` that can be sent to the MongoDB Server as a query/filter
-    public var data: Document {
+    public var queryDocument: Document {
         return aqt.document
     }
     
@@ -323,7 +314,7 @@ public struct Query: QueryProtocol {
 /// Makes a raw `Document` usable as `Query`
 extension Document: QueryProtocol {
     /// Makes a raw `Document` usable as `Query`
-    public var data: Document {
+    public var queryDocument: Document {
         return self
     }
 }
@@ -359,39 +350,39 @@ extension Document {
         
         switch q.aqt {
         case .typeof(let key, let type):
-            return doc[key].typeNumber == type.rawValue
+            return doc[key]?.makeBsonValue().typeNumber == type.rawValue
         case .valEquals(let key, let val):
-            return doc[key] == val.val
+            return doc[key]?.makeBsonValue() == val.makeBsonValue()
         case .valNotEquals(let key, let val):
-            return doc[key] != val.val
+            return doc[key]?.makeBsonValue() != val.makeBsonValue()
         case .greaterThan(let key, let val):
-            switch doc[key] {
+            switch doc[key]?.makeBsonValue() ?? .nothing {
             case .double(let d):
-                if let d2 = val.val.int32Value {
+                if let d2 = val.makeBsonValue().int32Value {
                     return d > Double(d2)
-                } else if let d2 = val.val.doubleValue {
+                } else if let d2 = val.makeBsonValue().doubleValue {
                     return d > d2
-                } else if let d2 = val.val.int64Value {
+                } else if let d2 = val.makeBsonValue().int64Value {
                     return d > Double(d2)
                 }
                 
                 return false
             case .int32(let d):
-                if let d2 = val.val.int32Value {
+                if let d2 = val.makeBsonValue().int32Value {
                     return d > d2
-                } else if let d2 = val.val.doubleValue {
+                } else if let d2 = val.makeBsonValue().doubleValue {
                     return Double(d) > d2
-                } else if let d2 = val.val.int64Value {
+                } else if let d2 = val.makeBsonValue().int64Value {
                     return Int64(d) > d2
                 }
                 
                 return false
             case .int64(let d):
-                if let d2 = val.val.int32Value {
+                if let d2 = val.makeBsonValue().int32Value {
                     return d > Int64(d2)
-                } else if let d2 = val.val.doubleValue {
+                } else if let d2 = val.makeBsonValue().doubleValue {
                     return Double(d) > d2
-                } else if let d2 = val.val.int64Value {
+                } else if let d2 = val.makeBsonValue().int64Value {
                     return d > d2
                 }
                 
@@ -400,33 +391,33 @@ extension Document {
                 return false
             }
         case .greaterThanOrEqual(let key, let val):
-            switch doc[key] {
+            switch doc[key]?.makeBsonValue() ?? .nothing {
             case .double(let d):
-                if let d2 = val.val.int32Value {
+                if let d2 = val.makeBsonValue().int32Value {
                     return d >= Double(d2)
-                } else if let d2 = val.val.doubleValue {
+                } else if let d2 = val.makeBsonValue().doubleValue {
                     return d >= d2
-                } else if let d2 = val.val.int64Value {
+                } else if let d2 = val.makeBsonValue().int64Value {
                     return d >= Double(d2)
                 }
                 
                 return false
             case .int32(let d):
-                if let d2 = val.val.int32Value {
+                if let d2 = val.makeBsonValue().int32Value {
                     return d >= d2
-                } else if let d2 = val.val.doubleValue {
+                } else if let d2 = val.makeBsonValue().doubleValue {
                     return Double(d) >= d2
-                } else if let d2 = val.val.int64Value {
+                } else if let d2 = val.makeBsonValue().int64Value {
                     return Int64(d) >= d2
                 }
                 
                 return false
             case .int64(let d):
-                if let d2 = val.val.int32Value {
+                if let d2 = val.makeBsonValue().int32Value {
                     return d >= Int64(d2)
-                } else if let d2 = val.val.doubleValue {
+                } else if let d2 = val.makeBsonValue().doubleValue {
                     return Double(d) >= d2
-                } else if let d2 = val.val.int64Value {
+                } else if let d2 = val.makeBsonValue().int64Value {
                     return d >= d2
                 }
                 
@@ -435,33 +426,33 @@ extension Document {
                 return false
             }
         case .smallerThan(let key, let val):
-            switch doc[key] {
+            switch doc[key]?.makeBsonValue() ?? .nothing {
             case .double(let d):
-                if let d2 = val.val.int32Value {
+                if let d2 = val.makeBsonValue().int32Value {
                     return d < Double(d2)
-                } else if let d2 = val.val.doubleValue {
+                } else if let d2 = val.makeBsonValue().doubleValue {
                     return d < d2
-                } else if let d2 = val.val.int64Value {
+                } else if let d2 = val.makeBsonValue().int64Value {
                     return d <  Double(d2)
                 }
                 
                 return false
             case .int32(let d):
-                if let d2 = val.val.int32Value {
+                if let d2 = val.makeBsonValue().int32Value {
                     return d < d2
-                } else if let d2 = val.val.doubleValue {
+                } else if let d2 = val.makeBsonValue().doubleValue {
                     return Double(d) < d2
-                } else if let d2 = val.val.int64Value {
+                } else if let d2 = val.makeBsonValue().int64Value {
                     return Int64(d) < d2
                 }
                 
                 return false
             case .int64(let d):
-                if let d2 = val.val.int32Value {
+                if let d2 = val.makeBsonValue().int32Value {
                     return d < Int64(d2)
-                } else if let d2 = val.val.doubleValue {
+                } else if let d2 = val.makeBsonValue().doubleValue {
                     return Double(d) < d2
-                } else if let d2 = val.val.int64Value {
+                } else if let d2 = val.makeBsonValue().int64Value {
                     return d < d2
                 }
                 
@@ -470,33 +461,33 @@ extension Document {
                 return false
             }
         case .smallerThanOrEqual(let key, let val):
-            switch doc[key] {
+            switch doc[key]?.makeBsonValue() ?? .nothing {
             case .double(let d):
-                if let d2 = val.val.int32Value {
+                if let d2 = val.makeBsonValue().int32Value {
                     return d <= Double(d2)
-                } else if let d2 = val.val.doubleValue {
+                } else if let d2 = val.makeBsonValue().doubleValue {
                     return d <= d2
-                } else if let d2 = val.val.int64Value {
+                } else if let d2 = val.makeBsonValue().int64Value {
                     return d <= Double(d2)
                 }
                 
                 return false
             case .int32(let d):
-                if let d2 = val.val.int32Value {
+                if let d2 = val.makeBsonValue().int32Value {
                     return d <= d2
-                } else if let d2 = val.val.doubleValue {
+                } else if let d2 = val.makeBsonValue().doubleValue {
                     return Double(d) <= d2
-                } else if let d2 = val.val.int64Value {
+                } else if let d2 = val.makeBsonValue().int64Value {
                     return Int64(d) <= d2
                 }
                 
                 return false
             case .int64(let d):
-                if let d2 = val.val.int32Value {
+                if let d2 = val.makeBsonValue().int32Value {
                     return d <= Int64(d2)
-                } else if let d2 = val.val.doubleValue {
+                } else if let d2 = val.makeBsonValue().doubleValue {
                     return Double(d) <= d2
-                } else if let d2 = val.val.int64Value {
+                } else if let d2 = val.makeBsonValue().int64Value {
                     return d <= d2
                 }
                 
@@ -522,22 +513,26 @@ extension Document {
             return false
         case .not(let aqt):
             return !self.matches(query: Query(aqt: aqt))
-        case .contains(let key, let val, _):
-            switch doc[key] {
+        case .contains(let key, let val, let options):
+            switch doc[key]?.makeBsonValue() ?? .nothing {
             case .string(let stringVal):
+                if options.contains("i") {
+                    return stringVal.lowercased().contains(val.lowercased())
+                }
+                
                 return stringVal.contains(val)
             default:
                 return false
             }
         case .startsWith(let key, let val):
-            switch doc[key] {
+            switch doc[key]?.makeBsonValue() ?? .nothing {
             case .string(let stringVal):
                 return stringVal.hasPrefix(val)
             default:
                 return false
             }
         case .endsWith(let key, let val):
-            switch doc[key] {
+            switch doc[key]?.makeBsonValue() ?? .nothing {
             case .string(let stringVal):
                 return stringVal.hasSuffix(val)
             default:
@@ -546,6 +541,14 @@ extension Document {
         case .nothing:
             return true
         }
+    }
+}
+
+public struct Pipeline {
+    var document: Document
+    
+    public init(_ document: Document) {
+        self.document = document
     }
 }
 

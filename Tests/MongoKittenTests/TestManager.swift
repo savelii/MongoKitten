@@ -15,7 +15,7 @@ final class TestManager {
         case TestDataNotPresent
     }
     
-    static var server = try! Server(at: "127.0.0.1", using: (username: "mongokitten-unittest-user", password: "mongokitten-unittest-password", against: "admin"), automatically: false)
+    static var server = try! Server(hostname: "127.0.0.1")
     static var db: Database { return server["mongokitten-unittest"] }
     static let wcol = db["wcol"]
     
@@ -29,7 +29,7 @@ final class TestManager {
     
     static func clean() throws {
         // Erase the testing database:
-        for aCollection in try db.getCollections() where !aCollection.name.contains("system") && aCollection.name != "zips" {
+        for aCollection in try db.listCollections() where !aCollection.name.contains("system") && aCollection.name != "zips" {
             try aCollection.drop()
         }
         
@@ -43,11 +43,3 @@ final class TestManager {
         try server.disconnect()
     }
 }
-
-#if !swift(>=3.0)
-    extension String {
-        func contains(other: String) -> Bool {
-            return self.containsString(other)
-        }
-    }
-#endif

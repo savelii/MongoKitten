@@ -11,7 +11,7 @@ import BSON
 
 public final class Cursor<T> {
     public let namespace: String
-    public let server: Server
+    public let collection: Collection
     fileprivate var cursorID: Int64
     fileprivate let chunkSize: Int32
     
@@ -22,25 +22,25 @@ public final class Cursor<T> {
     let transform: Transformer
     
     /// If firstDataSet is nil, reply.documents will be passed to transform as initial data
-    internal convenience init?(namespace: String, server: Server, reply: Message, chunkSize: Int32, transform: @escaping Transformer) {
+    internal convenience init?(namespace: String, collection: Collection, reply: Message, chunkSize: Int32, transform: @escaping Transformer) {
         guard case .Reply(_, _, _, let cursorID, _, _, let documents) = reply else {
             return nil
         }
         
-        self.init(namespace: namespace, server: server, cursorID: cursorID, initialData: documents.flatMap(transform), chunkSize: chunkSize, transform: transform)
+        self.init(namespace: namespace, collection: collection, cursorID: cursorID, initialData: documents.flatMap(transform), chunkSize: chunkSize, transform: transform)
     }
     
-    internal convenience init(cursorDocument cursor: Document, server: Server, chunkSize: Int32, transform: @escaping Transformer) throws {
-        guard let cursorID = cursor["id"].int64Value, let namespace = cursor["ns"].stringValue, let firstBatch = cursor["firstBatch"].documentValue else {
+    internal convenience init(cursorDocument cursor: Document, collection: Collection, chunkSize: Int32, transform: @escaping Transformer) throws {
+        guard let cursorID = cursor["id"] as? Int64, let namespace = cursor["ns"] as? String, let firstBatch = cursor["firstBatch"] as? Document else {
             throw MongoError.cursorInitializationError(cursorDocument: cursor)
         }
         
-        self.init(namespace: namespace, server: server, cursorID: cursorID, initialData: firstBatch.arrayValue.flatMap{$0.documentValue}.flatMap(transform), chunkSize: chunkSize, transform: transform)
+        self.init(namespace: namespace, collection: collection, cursorID: cursorID, initialData: firstBatch.arrayValue.flatMap{$0.documentValue}.flatMap(transform), chunkSize: chunkSize, transform: transform)
     }
     
-    internal init(namespace: String, server: Server, cursorID: Int64, initialData: [T], chunkSize: Int32, transform: @escaping Transformer) {
+    internal init(namespace: String, collection: Collection, cursorID: Int64, initialData: [T], chunkSize: Int32, transform: @escaping Transformer) {
         self.namespace = namespace
-        self.server = server
+        self.collection = collection
         self.cursorID = cursorID
         self.data = initialData
         self.chunkSize = chunkSize
@@ -49,7 +49,7 @@ public final class Cursor<T> {
     
     public init<B>(base: Cursor<B>, transform: @escaping (B) -> (T?)) {
         self.namespace = base.namespace
-        self.server = base.server
+        self.collection = base.collection
         self.cursorID = base.cursorID
         self.chunkSize = base.chunkSize
         self.transform = {
@@ -65,46 +65,66 @@ public final class Cursor<T> {
     /// Gets more information and puts it in the buffer
     fileprivate func getMore() {
         do {
-            let request = Message.GetMore(requestID: server.nextMessageID(), namespace: namespace, numberToReturn: chunkSize, cursor: cursorID)
-            let requestId = try server.send(message: request)
-            let reply = try server.await(response: requestId)
-            
-            guard case .Reply(_, _, _, let cursorID, _, _, let documents) = reply else {
-                throw InternalMongoError.incorrectReply(reply: reply)
+            if collection.database.server.serverData?.maxWireVersion ?? 0 >= 4 {
+                let reply = try collection.database.execute(command: [
+                    "getMore": Int64(self.cursorID).makeBsonValue(),
+                    "collection": collection.name,
+                    "batchSize": Int32(chunkSize).makeBsonValue()
+                    ])
+                
+                guard case .Reply(_, _, _, _, _, _, let resultDocs) = reply else {
+                    throw InternalMongoError.incorrectReply(reply: reply)
+                }
+                
+                let documents = resultDocs.first?.makeBsonValue()["cursor"]["nextBatch"].document ?? []
+                for (_, value) in documents {
+                    if let doc = transform(value.document) {
+                        self.data.append(doc)
+                    }
+                }
+                
+                self.cursorID = resultDocs.first?.makeBsonValue()["cursor"]["id"].int64 ?? -1
+            } else {
+                let connection = try collection.database.server.reserveConnection()
+                
+                defer {
+                    collection.database.server.returnConnection(connection)
+                }
+                
+                let request = Message.GetMore(requestID: collection.database.server.nextMessageID(), namespace: namespace, numberToReturn: chunkSize, cursor: cursorID)
+                
+                let reply = try collection.database.server.sendAndAwait(message: request, overConnection: connection)
+                
+                guard case .Reply(_, _, _, let cursorID, _, _, let documents) = reply else {
+                    throw InternalMongoError.incorrectReply(reply: reply)
+                }
+                
+                self.data += documents.flatMap(transform)
+                self.cursorID = cursorID
             }
-            
-            self.data += documents.flatMap(transform)
-            self.cursorID = cursorID
         } catch {
-            fatalError("Error fetching extra data from the server in \(self) with error: \(error)")
+            collection.database.server.cursorErrorHandler(error)
         }
     }
     
     deinit {
         if cursorID != 0 {
             do {
-                let killCursorsMessage = Message.KillCursors(requestID: server.nextMessageID(), cursorIDs: [self.cursorID])
-                try server.send(message: killCursorsMessage)
+                let connection = try collection.database.server.reserveConnection()
+                
+                defer {
+                    collection.database.server.returnConnection(connection)
+                }
+                let killCursorsMessage = Message.KillCursors(requestID: collection.database.server.nextMessageID(), cursorIDs: [self.cursorID])
+                try collection.database.server.send(message: killCursorsMessage, overConnection: connection)
             } catch {
-                print("Error while cleaning up MongoDB cursor \(self): \(error)")
+                collection.database.server.cursorErrorHandler(error)
             }
         }
     }
 }
 
 extension Cursor : Sequence {
-    #if !swift(>=3.0)
-    public func generate() -> AnyGenerator<T> {
-        return AnyGenerator {
-            if self.data.isEmpty && self.cursorID != 0 {
-                // Get more data!
-                self.getMore()
-            }
-            
-            return self.data.isEmpty ? nil : self.data.removeFirst()
-        }
-    }
-    #else
     /// Makes an iterator to loop over the data this cursor points to
     /// - returns: The iterator
     public func makeIterator() -> AnyIterator<T> {
@@ -117,7 +137,6 @@ extension Cursor : Sequence {
             return self.data.isEmpty ? nil : self.data.removeFirst()
         }
     }
-    #endif
 }
 
 extension Cursor : CustomStringConvertible {
