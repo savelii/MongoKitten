@@ -15,6 +15,12 @@ import GeoJSON
 #if os(macOS)
     /// RegularExpression is named differently on Linux. Linux is our primary target.
     typealias RegularExpression = NSRegularExpression
+#else 
+    #if swift(>=3.1)
+    typealias RegularExpression = NSRegularExpression
+    #else
+    typealias RegularExpression = RegularExpression
+    #endif
 #endif
 
 
@@ -258,12 +264,24 @@ public indirect enum AQT {
             }
             
             return query
-        case .contains(let key, let val, let options):
-            return [key: ((try? RegularExpression(pattern: val, options: options)) ?? Null()) as ValueConvertible] as Document
+	case .contains(let key, let val, let options):
+#if swift(>=3.1)
+return [key: ((try? NSRegularExpression(pattern: val, options: options)) ?? Null()) as ValueConvertible] as Document
+#else
+return [key: ((try? RegularExpression(pattern: val, options: options)) ?? Null()) as ValueConvertible] as Document
+#endif
         case .startsWith(let key, let val):
-            return [key: ((try? RegularExpression(pattern: "^" + val, options: .anchorsMatchLines)) ?? Null()) as ValueConvertible]
+#if swift(>=3.1)
+ return [key: ((try? NSRegularExpression(pattern: "^" + val, options: .anchorsMatchLines)) ?? Null()) as ValueConvertible]
+#else
+return [key: ((try? RegularExpression(pattern: "^" + val, options: .anchorsMatchLines)) ?? Null()) as ValueConvertible]
+#endif
         case .endsWith(let key, let val):
-            return [key: ((try? RegularExpression(pattern: val + "$", options: .anchorsMatchLines)) ?? Null()) as ValueConvertible]
+#if swift(>=3.1)
+ return [key: ((try? NSRegularExpression(pattern: val + "$", options: .anchorsMatchLines)) ?? Null()) as ValueConvertible]
+#else
+return [key: ((try? RegularExpression(pattern: val + "$", options: .anchorsMatchLines)) ?? Null()) as ValueConvertible]
+#endif      
         case .nothing:
             return []
         case .near(let key, let point, let maxDistance, let minDistance):
@@ -318,7 +336,11 @@ public indirect enum AQT {
     case nothing
     
     /// Whether the String value within the `key` contains this `String`.
-    case contains(key: String, val: String, options: RegularExpression.Options)
+#if swift(>=3.1)
+ case contains(key: String, val: String, options: NSRegularExpression.Options)
+   #else
+case contains(key: String, val: String, options: RegularExpression.Options)
+     #endif    
     
     /// Whether the String value within the `key` starts with this `String`.
     case startsWith(key: String, val: String)

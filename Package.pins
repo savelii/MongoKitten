@@ -1,0 +1,48 @@
+{
+  "autoPin": true,
+  "pins": [
+    {
+      "package": "BSON",
+      "reason": null,
+      "repositoryURL": "https://github.com/savelii/BSON.git",
+      "version": "4.1.4"
+    },
+    {
+      "package": "Cryptor",
+      "reason": null,
+      "repositoryURL": "https://github.com/IBM-Swift/BlueCryptor.git",
+      "version": "0.8.8"
+    },
+    {
+      "package": "CryptoSwift",
+      "reason": null,
+      "repositoryURL": "https://github.com/krzyzanowskim/CryptoSwift.git",
+      "version": "0.6.7"
+    },
+    {
+      "package": "LogKitten",
+      "reason": null,
+      "repositoryURL": "https://github.com/OpenKitten/LogKitten.git",
+      "version": "0.3.0"
+    },
+    {
+      "package": "OpenSSL",
+      "reason": null,
+      "repositoryURL": "https://github.com/IBM-Swift/OpenSSL.git",
+      "version": "0.3.1"
+    },
+    {
+      "package": "Socket",
+      "reason": null,
+      "repositoryURL": "https://github.com/IBM-Swift/BlueSocket.git",
+      "version": "0.12.36"
+    },
+    {
+      "package": "SSLService",
+      "reason": null,
+      "repositoryURL": "https://github.com/IBM-Swift/BlueSSLService.git",
+      "version": "0.12.26"
+    }
+  ],
+  "version": 1
+}
